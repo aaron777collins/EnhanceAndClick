@@ -14,8 +14,16 @@ Quadrants: top-left, top-right, bottom-left, bottom-right, center
 The AI iteratively zooms until the target is big and centered, then saves
 the template. Later, the template can be clicked without re-zooming.
 
+Window/Screen Targeting:
+  zoomclick --start --window "Chrome"      # Start on specific window by title
+  zoomclick --start --window-class "firefox" # Start on window by class
+  zoomclick --start --window-id 12345      # Start on specific window ID
+  zoomclick --start --screen 1             # Start on specific screen (multi-monitor)
+  zoomclick --list-windows                 # List all windows with IDs
+
 Usage Examples:
   zoomclick --start                    # Take screenshot, show with quadrant guides
+  zoomclick --start -w "Firefox"       # Start zooming on Firefox window
   zoomclick --zoom top-left            # Zoom into top-left quadrant
   zoomclick --zoom center              # Zoom into center region
   zoomclick --zoom center              # Keep zooming until element is big
@@ -54,6 +62,139 @@ STATE_FILE = WORK_DIR / "state.json"
 WORK_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
+# ============== Window/Screen Helper Functions ==============
+
+def find_window_by_name(name: str) -> list:
+    """Find window IDs by title (substring match)."""
+    try:
+        result = subprocess.run(
+            ['xdotool', 'search', '--name', name],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return [int(wid) for wid in result.stdout.strip().split('\n') if wid]
+    except Exception:
+        pass
+    return []
+
+def find_window_by_class(class_name: str) -> list:
+    """Find window IDs by class."""
+    try:
+        result = subprocess.run(
+            ['xdotool', 'search', '--class', class_name],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return [int(wid) for wid in result.stdout.strip().split('\n') if wid]
+    except Exception:
+        pass
+    return []
+
+def get_window_geometry(window_id: int) -> dict:
+    """Get window position and size."""
+    try:
+        result = subprocess.run(
+            ['xdotool', 'getwindowgeometry', '--shell', str(window_id)],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            geo = {}
+            for line in result.stdout.strip().split('\n'):
+                if '=' in line:
+                    key, val = line.split('=', 1)
+                    geo[key] = int(val) if val.isdigit() else val
+            return geo
+    except Exception:
+        pass
+    return {}
+
+def list_windows() -> list:
+    """List all windows with IDs, names, and geometry."""
+    windows = []
+    try:
+        result = subprocess.run(
+            ['xdotool', 'search', '--onlyvisible', '--name', ''],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            for wid in result.stdout.strip().split('\n'):
+                if not wid:
+                    continue
+                wid = int(wid)
+                name_result = subprocess.run(
+                    ['xdotool', 'getwindowname', str(wid)],
+                    capture_output=True, text=True
+                )
+                name = name_result.stdout.strip() if name_result.returncode == 0 else ""
+                geo = get_window_geometry(wid)
+                windows.append({
+                    "id": wid,
+                    "name": name,
+                    "x": geo.get("X", 0),
+                    "y": geo.get("Y", 0),
+                    "width": geo.get("WIDTH", 0),
+                    "height": geo.get("HEIGHT", 0)
+                })
+    except Exception:
+        pass
+    return windows
+
+def take_screenshot_window(window_id: int, name="window") -> Path:
+    """Take screenshot of a specific window using ImageMagick import."""
+    timestamp = int(time.time())
+    path = WORK_DIR / f"{name}_{timestamp}.png"
+    
+    display = os.environ.get('DISPLAY', ':99')
+    result = subprocess.run(
+        ['import', '-window', str(window_id), str(path)],
+        env={**os.environ, 'DISPLAY': display},
+        capture_output=True
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"Window screenshot failed: {result.stderr.decode()}")
+    
+    return path
+
+def take_screenshot_screen(screen_num: int, name="screen") -> Path:
+    """Take screenshot of a specific screen (multi-monitor)."""
+    import re
+    timestamp = int(time.time())
+    path = WORK_DIR / f"{name}_{timestamp}.png"
+    
+    display = os.environ.get('DISPLAY', ':99')
+    
+    result = subprocess.run(['xrandr'], capture_output=True, text=True)
+    screens = []
+    for line in result.stdout.split('\n'):
+        if ' connected' in line:
+            match = re.search(r'(\d+)x(\d+)\+(\d+)\+(\d+)', line)
+            if match:
+                screens.append({
+                    'width': int(match.group(1)),
+                    'height': int(match.group(2)),
+                    'x': int(match.group(3)),
+                    'y': int(match.group(4))
+                })
+    
+    if screen_num >= len(screens):
+        raise RuntimeError(f"Screen {screen_num} not found. Available: 0-{len(screens)-1}")
+    
+    s = screens[screen_num]
+    full_path = WORK_DIR / f"full_{timestamp}.png"
+    subprocess.run(['scrot', str(full_path)], env={**os.environ, 'DISPLAY': display}, check=True)
+    
+    subprocess.run([
+        'convert', str(full_path),
+        '-crop', f"{s['width']}x{s['height']}+{s['x']}+{s['y']}",
+        '+repage', str(path)
+    ], check=True)
+    
+    full_path.unlink()
+    return path
+
+# ============== End Window/Screen Helpers ==============
+
 @dataclass
 class ViewportState:
     """Tracks the current viewport region on screen."""
@@ -64,6 +205,9 @@ class ViewportState:
     screen_width: int = 0
     screen_height: int = 0
     zoom_level: int = 0  # How many times we've zoomed
+    window_id: int = 0   # Window ID if targeting a window (0 = full screen)
+    window_offset_x: int = 0  # Window X position on screen
+    window_offset_y: int = 0  # Window Y position on screen
     
     def to_dict(self):
         return asdict(self)
@@ -174,25 +318,67 @@ def get_quadrant_bounds(state: ViewportState, quadrant: str) -> Tuple[int, int, 
     else:
         raise ValueError(f"Unknown quadrant: {quadrant}. Use: top-left, top-right, bottom-left, bottom-right, center")
 
-def start_session() -> dict:
-    """Start a new zoom session with full screenshot."""
-    screenshot_path = take_screenshot("full")
+def start_session(window_id: int = None, screen_num: int = None) -> dict:
+    """Start a new zoom session with full screenshot or window/screen capture."""
     screen_w, screen_h = get_screen_size()
+    
+    window_offset_x = 0
+    window_offset_y = 0
+    capture_width = screen_w
+    capture_height = screen_h
+    
+    if window_id:
+        # Capture specific window
+        screenshot_path = take_screenshot_window(window_id, "window")
+        geo = get_window_geometry(window_id)
+        window_offset_x = geo.get("X", 0)
+        window_offset_y = geo.get("Y", 0)
+        capture_width = geo.get("WIDTH", screen_w)
+        capture_height = geo.get("HEIGHT", screen_h)
+    elif screen_num is not None:
+        # Capture specific screen
+        screenshot_path = take_screenshot_screen(screen_num, "screen")
+        # Get screen geometry for offset tracking
+        import re
+        result = subprocess.run(['xrandr'], capture_output=True, text=True)
+        screens = []
+        for line in result.stdout.split('\n'):
+            if ' connected' in line:
+                match = re.search(r'(\d+)x(\d+)\+(\d+)\+(\d+)', line)
+                if match:
+                    screens.append({
+                        'width': int(match.group(1)),
+                        'height': int(match.group(2)),
+                        'x': int(match.group(3)),
+                        'y': int(match.group(4))
+                    })
+        if screen_num < len(screens):
+            s = screens[screen_num]
+            window_offset_x = s['x']
+            window_offset_y = s['y']
+            capture_width = s['width']
+            capture_height = s['height']
+    else:
+        # Full screen capture
+        screenshot_path = take_screenshot("full")
     
     # Initialize viewport state
     state = ViewportState(
         x=0, y=0,
-        width=screen_w, height=screen_h,
+        width=capture_width, height=capture_height,
         screen_width=screen_w, screen_height=screen_h,
-        zoom_level=0
+        zoom_level=0,
+        window_id=window_id or 0,
+        window_offset_x=window_offset_x,
+        window_offset_y=window_offset_y
     )
     state.save()
     
     # Create overlay version
     overlay_path = WORK_DIR / f"overlay_{int(time.time())}.png"
-    add_quadrant_overlay(screenshot_path, overlay_path, screen_w, screen_h)
+    add_quadrant_overlay(screenshot_path, overlay_path, capture_width, capture_height)
     
-    return {
+    result = {
         "success": True,
         "action": "start",
         "screenshot": str(overlay_path),
@@ -211,6 +397,12 @@ Keep zooming until your target is BIG and in the CENTER of the image.
 Then save it with: zoomclick --save "button_name"
 """.strip()
     }
+    
+    if window_id:
+        result["window_id"] = window_id
+        result["window_position"] = {"x": window_offset_x, "y": window_offset_y}
+    
+    return result
 
 def zoom_to_quadrant(quadrant: str) -> dict:
     """Zoom into a quadrant of the current viewport."""
@@ -221,14 +413,17 @@ def zoom_to_quadrant(quadrant: str) -> dict:
     # Get new viewport bounds
     new_x, new_y, new_w, new_h = get_quadrant_bounds(state, quadrant)
     
-    # Take fresh screenshot
-    screenshot_path = take_screenshot("full")
+    # Take fresh screenshot (window or full screen based on session)
+    if state.window_id:
+        screenshot_path = take_screenshot_window(state.window_id, "window")
+    else:
+        screenshot_path = take_screenshot("full")
     
     # Crop to new viewport
     cropped_path = WORK_DIR / f"zoom_{state.zoom_level + 1}_{int(time.time())}.png"
     crop_image(screenshot_path, new_x, new_y, new_w, new_h, cropped_path)
     
-    # Update state
+    # Update state (preserve window tracking)
     state.x = new_x
     state.y = new_y
     state.width = new_w
@@ -240,20 +435,24 @@ def zoom_to_quadrant(quadrant: str) -> dict:
     overlay_path = WORK_DIR / f"overlay_{state.zoom_level}_{int(time.time())}.png"
     add_quadrant_overlay(cropped_path, overlay_path, new_w, new_h)
     
-    return {
+    # Calculate actual screen coordinates (accounting for window offset)
+    screen_center_x = new_x + new_w // 2 + state.window_offset_x
+    screen_center_y = new_y + new_h // 2 + state.window_offset_y
+    
+    result = {
         "success": True,
         "action": "zoom",
         "quadrant": quadrant,
         "screenshot": str(overlay_path),
         "viewport": state.to_dict(),
         "screen_coords": {
-            "center_x": new_x + new_w // 2,
-            "center_y": new_y + new_h // 2,
+            "center_x": screen_center_x,
+            "center_y": screen_center_y,
             "description": "If you clicked now, this would be the screen coordinate"
         },
         "instructions": f"""
 Zoomed into {quadrant}. Now at zoom level {state.zoom_level}.
-Viewport: {new_w}x{new_h} at screen position ({new_x}, {new_y})
+Viewport: {new_w}x{new_h} at position ({new_x}, {new_y})
 
 If your target is BIG and CENTERED, save it:
   zoomclick --save "button_name"
@@ -265,6 +464,11 @@ To click the current center immediately (without saving):
   zoomclick --click-center
 """.strip()
     }
+    
+    if state.window_id:
+        result["window_id"] = state.window_id
+    
+    return result
 
 def save_template(name: str) -> dict:
     """Save current viewport as a reusable template."""
@@ -272,47 +476,69 @@ def save_template(name: str) -> dict:
     if not state:
         return {"success": False, "error": "No active session. Run: zoomclick --start"}
     
-    # Take fresh screenshot and crop current viewport
-    screenshot_path = take_screenshot("full")
+    # Take fresh screenshot (window or full screen based on session)
+    if state.window_id:
+        screenshot_path = take_screenshot_window(state.window_id, "window")
+    else:
+        screenshot_path = take_screenshot("full")
     
-    template_path = TEMPLATES_DIR / f"{name}.png"
-    meta_path = TEMPLATES_DIR / f"{name}.json"
+    # Add timestamp to avoid name collisions
+    timestamp = int(time.time())
+    full_name = f"{name}_{timestamp}"
+    
+    template_path = TEMPLATES_DIR / f"{full_name}.png"
+    meta_path = TEMPLATES_DIR / f"{full_name}.json"
     
     crop_image(screenshot_path, state.x, state.y, state.width, state.height, template_path)
     
-    # Save metadata - the center coordinates to click
-    center_x = state.x + state.width // 2
-    center_y = state.y + state.height // 2
+    # Save metadata - viewport center + screen-absolute coordinates
+    viewport_center_x = state.x + state.width // 2
+    viewport_center_y = state.y + state.height // 2
+    screen_center_x = viewport_center_x + state.window_offset_x
+    screen_center_y = viewport_center_y + state.window_offset_y
     
     meta = {
-        "name": name,
-        "center_x": center_x,
-        "center_y": center_y,
+        "name": full_name,
+        "base_name": name,
+        "viewport_x": viewport_center_x,
+        "viewport_y": viewport_center_y,
+        "center_x": screen_center_x,  # Screen-absolute for clicking
+        "center_y": screen_center_y,
+        "window_id": state.window_id,
+        "window_offset_x": state.window_offset_x,
+        "window_offset_y": state.window_offset_y,
         "viewport": state.to_dict(),
-        "created": time.time(),
-        "note": "Template saved for future clicking. Use: zoomclick --click " + name
+        "created": timestamp,
+        "note": "Template saved for future clicking. Use: zoomclick --click " + full_name
     }
     
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
     
-    return {
+    result = {
         "success": True,
         "action": "save",
-        "name": name,
+        "name": full_name,
+        "base_name": name,
         "template_path": str(template_path),
-        "click_coords": {"x": center_x, "y": center_y},
+        "viewport_coords": {"x": viewport_center_x, "y": viewport_center_y},
+        "screen_coords": {"x": screen_center_x, "y": screen_center_y},
         "instructions": f"""
-Template "{name}" saved!
+Template "{full_name}" saved!
 - Image: {template_path}
-- Click coordinates: ({center_x}, {center_y})
+- Screen coordinates: ({screen_center_x}, {screen_center_y})
 
 To click this element anytime, run:
-  zoomclick --click "{name}"
+  zoomclick --click "{full_name}"
 
 The tool will find the template on screen and click its center.
 """.strip()
     }
+    
+    if state.window_id:
+        result["window_id"] = state.window_id
+    
+    return result
 
 def find_template_on_screen(template_path: Path, screenshot_path: Path, min_confidence: float = 0.5) -> Optional[Tuple[int, int, float]]:
     """Find template on screen using OpenCV. Returns (center_x, center_y, confidence) or None."""
@@ -402,30 +628,43 @@ def click_center(no_click: bool = False) -> dict:
     if not state:
         return {"success": False, "error": "No active session. Run: zoomclick --start"}
     
-    x = state.x + state.width // 2
-    y = state.y + state.height // 2
+    # Viewport-relative center
+    viewport_x = state.x + state.width // 2
+    viewport_y = state.y + state.height // 2
+    
+    # Screen-absolute coordinates (account for window offset)
+    screen_x = viewport_x + state.window_offset_x
+    screen_y = viewport_y + state.window_offset_y
     
     if not no_click:
-        pyautogui.moveTo(x, y, duration=0.25)
-        pyautogui.click(x, y)
+        pyautogui.moveTo(screen_x, screen_y, duration=0.25)
+        pyautogui.click(screen_x, screen_y)
     
     # Take screenshot after click
-    screenshot_path = take_screenshot("after_click")
+    if state.window_id:
+        screenshot_path = take_screenshot_window(state.window_id, "after_click")
+    else:
+        screenshot_path = take_screenshot("after_click")
     
-    return {
+    result = {
         "success": True,
         "action": "click" if not no_click else "locate",
-        "x": x,
-        "y": y,
+        "viewport_coords": {"x": viewport_x, "y": viewport_y},
+        "screen_coords": {"x": screen_x, "y": screen_y},
         "viewport": state.to_dict(),
         "screenshot": str(screenshot_path)
     }
+    
+    if state.window_id:
+        result["window_id"] = state.window_id
+    
+    return result
 
 def list_templates() -> dict:
     """List all saved templates."""
     templates = []
     
-    for png in TEMPLATES_DIR.glob("*.png"):
+    for png in sorted(TEMPLATES_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
         name = png.stem
         meta_path = TEMPLATES_DIR / f"{name}.json"
         
@@ -436,6 +675,7 @@ def list_templates() -> dict:
         
         templates.append({
             "name": name,
+            "base_name": meta.get("base_name", name),
             "path": str(png),
             "click_coords": {"x": meta.get("center_x"), "y": meta.get("center_y")},
             "created": meta.get("created")
@@ -494,17 +734,53 @@ def main():
     group.add_argument("--list", "-l", action="store_true", help="List saved templates")
     group.add_argument("--reset", "-r", action="store_true", help="Reset zoom session")
     group.add_argument("--delete", "-d", metavar="NAME", help="Delete saved template")
+    group.add_argument("--list-windows", action="store_true", help="List all visible windows")
     
     parser.add_argument("--no-click", action="store_true", help="Don't click, just locate")
     parser.add_argument("--display", default=":99", help="X display (default :99)")
+    
+    # Window/screen targeting options (used with --start)
+    parser.add_argument("--window", "-w", help="Capture window by title (substring match)")
+    parser.add_argument("--window-class", help="Capture window by class name")
+    parser.add_argument("--window-id", type=int, help="Capture specific window ID")
+    parser.add_argument("--screen", type=int, help="Capture specific screen number (0-indexed)")
     
     args = parser.parse_args()
     
     os.environ['DISPLAY'] = args.display
     
     try:
+        # Handle list-windows first (doesn't need session)
+        if args.list_windows:
+            windows = list_windows()
+            result = {
+                "success": True,
+                "action": "list_windows",
+                "windows": windows,
+                "count": len(windows)
+            }
+            print(json.dumps(result, indent=2))
+            return 0
+        
         if args.start:
-            result = start_session()
+            # Resolve window targeting
+            window_id = None
+            if args.window_id:
+                window_id = args.window_id
+            elif args.window:
+                windows = find_window_by_name(args.window)
+                if not windows:
+                    print(json.dumps({"success": False, "error": f"No window found matching: {args.window}"}))
+                    return 1
+                window_id = windows[0]
+            elif args.window_class:
+                windows = find_window_by_class(args.window_class)
+                if not windows:
+                    print(json.dumps({"success": False, "error": f"No window found with class: {args.window_class}"}))
+                    return 1
+                window_id = windows[0]
+            
+            result = start_session(window_id=window_id, screen_num=args.screen)
         elif args.zoom:
             result = zoom_to_quadrant(args.zoom)
         elif args.save:
