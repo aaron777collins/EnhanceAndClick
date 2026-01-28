@@ -14,6 +14,10 @@ Quadrants: top-left, top-right, bottom-left, bottom-right, center
 The AI iteratively zooms until the target is big and centered, then saves
 the template. Later, the template can be clicked without re-zooming.
 
+Note: Guide line overlays are only added to output images for navigation.
+They never appear on the actual screen or in saved templates. Each operation
+takes a fresh screenshot directly from the display.
+
 Window/Screen Targeting:
   zoomclick --start --window "Chrome"      # Start on specific window by title
   zoomclick --start --window-class "firefox" # Start on window by class
