@@ -259,33 +259,23 @@ def crop_image(src_path: Path, x: int, y: int, width: int, height: int, dst_path
 
 def add_quadrant_overlay(src_path: Path, dst_path: Path, width: int, height: int):
     """Add quadrant guide lines to image for AI visualization."""
-    # Draw grid lines: 2 vertical, 2 horizontal (dividing into 9 regions - 4 corners + 4 edges + center)
-    # For simplicity, we'll divide into 4 quadrants + center
     mid_x = width // 2
     mid_y = height // 2
     quarter_x = width // 4
     quarter_y = height // 4
     
-    # Create semi-transparent overlay with quadrant labels
+    # Just draw guide lines, no text labels
     subprocess.run([
         'convert', str(src_path),
-        # Vertical center line
+        # Vertical center line (red)
         '-stroke', 'rgba(255,0,0,0.5)', '-strokewidth', '2',
         '-draw', f'line {mid_x},0 {mid_x},{height}',
-        # Horizontal center line  
+        # Horizontal center line (red)
         '-draw', f'line 0,{mid_y} {width},{mid_y}',
-        # Center region box (inner 50%)
+        # Center region box (green, inner 50%)
         '-stroke', 'rgba(0,255,0,0.5)', '-strokewidth', '2',
         '-fill', 'none',
         '-draw', f'rectangle {quarter_x},{quarter_y} {width-quarter_x},{height-quarter_y}',
-        # Labels
-        '-fill', 'rgba(255,255,255,0.9)', '-stroke', 'none',
-        '-font', 'DejaVu-Sans', '-pointsize', '20',
-        '-gravity', 'NorthWest', '-annotate', '+10+10', 'TOP-LEFT',
-        '-gravity', 'NorthEast', '-annotate', '+10+10', 'TOP-RIGHT',
-        '-gravity', 'SouthWest', '-annotate', '+10+10', 'BOTTOM-LEFT',
-        '-gravity', 'SouthEast', '-annotate', '+10+10', 'BOTTOM-RIGHT',
-        '-gravity', 'Center', '-annotate', '+0+0', 'CENTER',
         str(dst_path)
     ], check=True, capture_output=True)
 
